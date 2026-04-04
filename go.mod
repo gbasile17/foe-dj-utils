@@ -1,6 +1,6 @@
 module github.com/gbasile17/foe/dj-utils
 
-go 1.24.2
+go 1.25.5
 
 require (
 	github.com/bogem/id3v2/v2 v2.1.4
