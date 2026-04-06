@@ -33,13 +33,15 @@ var (
 	exportPlaylistFlat    bool
 	exportPlaylistM3U     bool
 	exportPlaylistSkipDRM bool
+	exportPlaylistZip     bool
 )
 
 func init() {
 	rootCmd.AddCommand(appleExportPlaylistCmd)
-	appleExportPlaylistCmd.Flags().BoolVarP(&exportPlaylistFlat, "flat", "f", true, "Copy all files to a single directory (default: true)")
-	appleExportPlaylistCmd.Flags().BoolVarP(&exportPlaylistM3U, "m3u", "m", true, "Generate M3U playlist file (default: true)")
-	appleExportPlaylistCmd.Flags().BoolVarP(&exportPlaylistSkipDRM, "skip-drm", "s", true, "Skip DRM-protected files with a warning (default: true)")
+	appleExportPlaylistCmd.Flags().BoolVarP(&exportPlaylistFlat, "flat", "f", true, "Copy all files to a single directory")
+	appleExportPlaylistCmd.Flags().BoolVarP(&exportPlaylistM3U, "m3u", "m", false, "Generate M3U playlist file")
+	appleExportPlaylistCmd.Flags().BoolVarP(&exportPlaylistSkipDRM, "skip-drm", "s", false, "Skip DRM-protected files with a warning")
+	appleExportPlaylistCmd.Flags().BoolVarP(&exportPlaylistZip, "zip", "z", false, "Output as a zip file (removes the directory after zipping)")
 }
 
 func runAppleExportPlaylist(cmd *cobra.Command, args []string) {
@@ -132,6 +134,16 @@ func runAppleExportPlaylist(cmd *cobra.Command, args []string) {
 			Styles.Error.Printf("\nFailed to write M3U file: %v\n", err)
 		} else {
 			fmt.Printf("\nGenerated playlist file: %s\n", m3uPath)
+		}
+	}
+
+	if exportPlaylistZip && successCount > 0 {
+		zipPath := outputDir + ".zip"
+		fmt.Printf("\nCreating zip archive: %s\n", zipPath)
+		if err := fileutil.ZipDirectory(outputDir, zipPath, true); err != nil {
+			Styles.Error.Printf("Failed to create zip: %v\n", err)
+		} else {
+			Styles.Success.Printf("Created: %s\n", zipPath)
 		}
 	}
 

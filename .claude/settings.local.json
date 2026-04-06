@@ -10,7 +10,8 @@
       "Bash(go build:*)",
       "Bash(/tmp/foe-test:*)",
       "Bash(go env:*)",
-      "Bash(asdf which:*)"
+      "Bash(asdf which:*)",
+      "Bash(md5:*)"
     ],
     "deny": []
   }

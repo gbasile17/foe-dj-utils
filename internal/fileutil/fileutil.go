@@ -2,6 +2,7 @@
 package fileutil
 
 import (
+	"archive/zip"
 	"io"
 	"os"
 	"path/filepath"
@@ -104,4 +105,60 @@ func DirExists(path string) bool {
 func FileExists(path string) bool {
 	_, err := os.Stat(path)
 	return !os.IsNotExist(err)
+}
+
+// ZipDirectory creates a zip archive of the given directory.
+// The zipPath is the output zip file path.
+// After successful creation, if removeDir is true, the source directory is removed.
+func ZipDirectory(dirPath, zipPath string, removeDir bool) error {
+	zipFile, err := os.Create(zipPath)
+	if err != nil {
+		return err
+	}
+	defer zipFile.Close()
+
+	w := zip.NewWriter(zipFile)
+	defer w.Close()
+
+	baseDir := filepath.Base(dirPath)
+
+	err = filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() {
+			return nil
+		}
+
+		relPath, err := filepath.Rel(dirPath, path)
+		if err != nil {
+			return err
+		}
+
+		zipEntryPath := filepath.Join(baseDir, relPath)
+
+		f, err := w.Create(zipEntryPath)
+		if err != nil {
+			return err
+		}
+
+		srcFile, err := os.Open(path)
+		if err != nil {
+			return err
+		}
+		defer srcFile.Close()
+
+		_, err = io.Copy(f, srcFile)
+		return err
+	})
+
+	if err != nil {
+		return err
+	}
+
+	if removeDir {
+		return os.RemoveAll(dirPath)
+	}
+	return nil
 }
