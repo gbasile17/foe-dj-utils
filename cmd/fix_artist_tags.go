@@ -9,7 +9,7 @@ import (
 	"sync"
 
 	"github.com/fatih/color"
-	"github.com/gbasile17/foe/dj-utils/pkg/audiotag"
+	"github.com/gbasile17/foe/dj-utils/internal/audiotag"
 	"github.com/spf13/cobra"
 )
 

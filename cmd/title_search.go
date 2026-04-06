@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/gbasile17/foe/dj-utils/internal/music"
 	"github.com/spf13/cobra"
 )
 
@@ -24,28 +25,25 @@ that contain the given string (case-insensitive). If no directories are provided
 		if len(dirs) == 0 {
 			envDir := os.Getenv("MUSICDIR")
 			if envDir == "" {
-				fmt.Println(Styles.Error.Sprint("No directories provided and $MUSICDIR is not set."))
+				Styles.Error.Println("No directories provided and $MUSICDIR is not set.")
 				return nil
 			}
 			dirs = []string{envDir}
 		}
 
-		// Perform the search
-		results, err := searchTitles(dirs, query)
+		results, err := music.SearchTitles(dirs, query)
 		if err != nil {
-			fmt.Println(Styles.Error.Sprintf("Error searching titles: %v", err))
+			Styles.Error.Printf("Error searching titles: %v\n", err)
 			return nil
 		}
 
-		// Display results
 		if len(results) == 0 {
-			fmt.Println(Styles.Header.Sprintf("No titles found containing '%s'.", query))
+			Styles.Header.Printf("No titles found containing '%s'.\n", query)
 		} else {
-			fmt.Println(Styles.Header.Sprintf("\nTitles containing '%s':\n", query))
+			Styles.Header.Printf("\nTitles containing '%s':\n\n", query)
 			for _, result := range results {
 				fmt.Printf("%s %s\n", Styles.Title.Sprint("Title:"), Styles.Title.Sprint(result.Title))
-				fmt.Printf(" %s\n", Styles.Path.Sprint(result.Path))
-				fmt.Println()
+				fmt.Printf(" %s\n\n", Styles.Path.Sprint(result.Path))
 			}
 		}
 

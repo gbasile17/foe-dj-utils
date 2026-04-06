@@ -2,7 +2,15 @@
   "permissions": {
     "allow": [
       "WebFetch(domain:github.com)",
-      "Bash(go run:*)"
+      "Bash(go run:*)",
+      "Bash(wc:*)",
+      "Bash(osascript:*)",
+      "Bash(go install:*)",
+      "Bash(asdf reshim:*)",
+      "Bash(go build:*)",
+      "Bash(/tmp/foe-test:*)",
+      "Bash(go env:*)",
+      "Bash(asdf which:*)"
     ],
     "deny": []
   }

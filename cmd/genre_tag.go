@@ -10,7 +10,8 @@ import (
 	"time"
 
 	"github.com/fatih/color"
-	"github.com/gbasile17/foe/dj-utils/pkg/audiotag"
+	"github.com/gbasile17/foe/dj-utils/internal/audiotag"
+	"github.com/gbasile17/foe/dj-utils/internal/music"
 	"github.com/michiwend/gomusicbrainz"
 	"github.com/spf13/cobra"
 )
@@ -158,7 +159,7 @@ func analyzeFileForGenre(filePath string) (GenreTagResult, error) {
 	tags, err := audiotag.ReadTags(filePath)
 	if err != nil {
 		// Fallback to filename parsing
-		result.Title = extractTitleFromFilename(filePath)
+		result.Title = music.ExtractTitleFromFilename(filePath)
 		result.Artist = "Unknown Artist"
 		result.Album = "Unknown Album"
 		result.HasGenre = false
@@ -173,7 +174,7 @@ func analyzeFileForGenre(filePath string) (GenreTagResult, error) {
 
 	// Use filename as fallback for empty title
 	if result.Title == "" {
-		result.Title = extractTitleFromFilename(filePath)
+		result.Title = music.ExtractTitleFromFilename(filePath)
 	}
 	if result.Artist == "" {
 		result.Artist = "Unknown Artist"

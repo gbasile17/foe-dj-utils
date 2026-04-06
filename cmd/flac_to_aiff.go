@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/fatih/color"
-	"github.com/gbasile17/foe/dj-utils/pkg/audiotag"
+	"github.com/gbasile17/foe/dj-utils/internal/audiotag"
 	"github.com/spf13/cobra"
 )
 
@@ -127,7 +127,7 @@ var flacToAiffCmd = &cobra.Command{
 		}
 
 		// Summary
-		fmt.Printf("\n" + strings.Repeat("=", 50) + "\n")
+		fmt.Print("\n" + strings.Repeat("=", 50) + "\n")
 		if successCount == len(files) {
 			color.Green("✅ Successfully converted all %d files!", successCount)
 		} else {
