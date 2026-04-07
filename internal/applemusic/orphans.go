@@ -160,20 +160,57 @@ func findOrphanedByMissingLocation(deletedPaths []string) ([]Track, error) {
 	return allOrphans, nil
 }
 
-// DeleteTracksByPersistentID deletes tracks from the Music library by their persistent IDs
-func DeleteTracksByPersistentID(persistentIDs []string) error {
+// DeleteOrphanedTracksByPersistentID safely removes orphaned tracks from the library.
+// IMPORTANT: This ONLY deletes tracks where the file is confirmed missing.
+// Tracks with valid files are skipped to prevent accidental data loss.
+func DeleteOrphanedTracksByPersistentID(persistentIDs []string) error {
 	if len(persistentIDs) == 0 {
 		return nil
 	}
 
-	// Delete tracks one by one to handle errors gracefully
+	// Delete tracks one by one, but ONLY if they are truly orphaned (file missing)
 	var errors []string
+	var skipped []string
 	for _, pid := range persistentIDs {
+		// First, verify this track is actually orphaned (file doesn't exist)
+		// If the file exists, we skip it to prevent data loss
 		script := fmt.Sprintf(`
 tell application "Music"
 	try
-		delete (first file track of playlist "Library" whose persistent ID is "%s")
-		return "ok"
+		set targetPID to "%s"
+		set matchingTracks to (every file track of playlist "Library" whose persistent ID is targetPID)
+		set matchCount to count of matchingTracks
+		if matchCount is 0 then
+			return "error: no track found"
+		else if matchCount > 1 then
+			return "error: multiple tracks found - aborting"
+		else
+			set t to item 1 of matchingTracks
+			try
+				-- Try to get the file location - if this succeeds, file exists
+				set loc to location of t
+				if loc is not missing value then
+					-- File exists! Check if it's actually accessible
+					try
+						set locAlias to loc as alias
+						-- File is accessible, this is NOT an orphan
+						return "error: file exists - not an orphan, skipping to prevent data loss"
+					on error
+						-- File reference exists but file is not accessible - safe to delete
+						delete t
+						return "ok"
+					end try
+				else
+					-- Location is missing value - orphan, safe to delete
+					delete t
+					return "ok"
+				end if
+			on error
+				-- Could not get location - orphan, safe to delete
+				delete t
+				return "ok"
+			end try
+		end if
 	on error errMsg
 		return "error: " & errMsg
 	end try
@@ -184,8 +221,16 @@ end tell
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("failed to delete track %s: %v", pid, err))
 		} else if strings.HasPrefix(output, "error:") {
-			errors = append(errors, fmt.Sprintf("track %s: %s", pid, output))
+			if strings.Contains(output, "not an orphan") {
+				skipped = append(skipped, pid)
+			} else {
+				errors = append(errors, fmt.Sprintf("track %s: %s", pid, output))
+			}
 		}
+	}
+
+	if len(skipped) > 0 {
+		fmt.Printf("Warning: Skipped %d tracks that still have valid files\n", len(skipped))
 	}
 
 	if len(errors) > 0 {
@@ -195,19 +240,53 @@ end tell
 	return nil
 }
 
-// DeleteTracksByDatabaseID deletes tracks by their database IDs (faster than persistent ID)
-func DeleteTracksByDatabaseID(databaseIDs []int) error {
+// DeleteTracksByPersistentID is DEPRECATED - use DeleteOrphanedTracksByPersistentID instead.
+// This function is kept for backwards compatibility but now just calls the safe version.
+func DeleteTracksByPersistentID(persistentIDs []string) error {
+	return DeleteOrphanedTracksByPersistentID(persistentIDs)
+}
+
+// DeleteOrphanedTracksByDatabaseID safely removes orphaned tracks by database ID.
+// IMPORTANT: This ONLY deletes tracks where the file is confirmed missing.
+func DeleteOrphanedTracksByDatabaseID(databaseIDs []int) error {
 	if len(databaseIDs) == 0 {
 		return nil
 	}
 
 	var errors []string
+	var skipped int
 	for _, dbID := range databaseIDs {
 		script := fmt.Sprintf(`
 tell application "Music"
 	try
-		delete (first file track of playlist "Library" whose database ID is %d)
-		return "ok"
+		set targetID to %d
+		set matchingTracks to (every file track of playlist "Library" whose database ID is targetID)
+		set matchCount to count of matchingTracks
+		if matchCount is 0 then
+			return "error: no track found"
+		else if matchCount > 1 then
+			return "error: multiple tracks found - aborting"
+		else
+			set t to item 1 of matchingTracks
+			try
+				set loc to location of t
+				if loc is not missing value then
+					try
+						set locAlias to loc as alias
+						return "error: file exists - not an orphan"
+					on error
+						delete t
+						return "ok"
+					end try
+				else
+					delete t
+					return "ok"
+				end if
+			on error
+				delete t
+				return "ok"
+			end try
+		end if
 	on error errMsg
 		return "error: " & errMsg
 	end try
@@ -218,8 +297,16 @@ end tell
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("failed to delete track %d: %v", dbID, err))
 		} else if strings.HasPrefix(output, "error:") {
-			errors = append(errors, fmt.Sprintf("track %d: %s", dbID, output))
+			if strings.Contains(output, "not an orphan") {
+				skipped++
+			} else {
+				errors = append(errors, fmt.Sprintf("track %d: %s", dbID, output))
+			}
 		}
+	}
+
+	if skipped > 0 {
+		fmt.Printf("Warning: Skipped %d tracks that still have valid files\n", skipped)
 	}
 
 	if len(errors) > 0 {
@@ -227,6 +314,11 @@ end tell
 	}
 
 	return nil
+}
+
+// DeleteTracksByDatabaseID is DEPRECATED - use DeleteOrphanedTracksByDatabaseID instead.
+func DeleteTracksByDatabaseID(databaseIDs []int) error {
+	return DeleteOrphanedTracksByDatabaseID(databaseIDs)
 }
 
 // DeleteAllOrphanedTracks finds and deletes all orphaned tracks in the library.

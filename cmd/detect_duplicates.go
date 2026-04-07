@@ -12,8 +12,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+var detectAppleCleanup bool
+
 func init() {
 	rootCmd.AddCommand(detectDuplicatesCmd)
+	detectDuplicatesCmd.Flags().BoolVarP(&detectAppleCleanup, "apple-cleanup", "a", false, "Clean up orphaned tracks in Apple Music after deleting files")
 }
 
 var detectDuplicatesCmd = &cobra.Command{
@@ -167,11 +170,8 @@ func manageDeletionList(files []string) {
 					}
 				}
 
-				if len(deletedPaths) > 0 && applemusic.IsAvailable() {
-					fmt.Println()
-					if promptYesNo(Styles.Prompt.Sprint("Clean up orphaned tracks in Apple Music?")) {
-						cleanupAppleMusicOrphans()
-					}
+				if len(deletedPaths) > 0 && detectAppleCleanup && applemusic.IsAvailable() {
+					cleanupAppleMusicOrphans()
 				}
 				return
 			} else if input == "r" {

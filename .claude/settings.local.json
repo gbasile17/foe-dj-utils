@@ -11,7 +11,9 @@
       "Bash(/tmp/foe-test:*)",
       "Bash(go env:*)",
       "Bash(asdf which:*)",
-      "Bash(md5:*)"
+      "Bash(md5:*)",
+      "Bash(hash:*)",
+      "Bash(/Users/foe/.asdf/installs/golang/1.24.2/bin/foe apple-recover:*)"
     ],
     "deny": []
   }
