@@ -358,6 +358,89 @@ end tell
 	return added, nil
 }
 
+// RecreatePlaylist clones a user playlist's tracks into a new playlist, deletes
+// the original, and renames the clone to the original name. This forces iCloud
+// Music Library to re-upload the playlist (the new playlist has a fresh
+// persistent ID), which is the documented workaround for desynced playlists.
+//
+// Returns the new playlist's persistent ID.
+//
+// Refuses to operate on smart playlists, folder playlists, or special-kind
+// playlists. Errors out (without deleting anything) if the source can't be
+// found unambiguously, if "<name> (resync)" already exists from a prior run,
+// or if the cloned track count doesn't match the source.
+func RecreatePlaylist(playlistName string) (string, error) {
+	escapedName := strings.ReplaceAll(playlistName, "\"", "\\\"")
+	script := fmt.Sprintf(`
+on run
+	tell application "Music"
+		set srcName to "%s"
+		set matches to (every user playlist whose name is srcName)
+		if (count of matches) is 0 then
+			error "no user playlist named " & srcName
+		end if
+		if (count of matches) > 1 then
+			error "multiple user playlists named " & srcName
+		end if
+		set src to item 1 of matches
+
+		if smart of src is true then
+			error "refusing to clone smart playlist"
+		end if
+		if (special kind of src) is not none then
+			error "refusing to clone special-kind playlist"
+		end if
+
+		set srcPID to persistent ID of src
+		set srcCount to count of tracks of src
+		set tmpName to srcName & " (resync)"
+
+		if (count of (every user playlist whose name is tmpName)) > 0 then
+			error "playlist named " & tmpName & " already exists"
+		end if
+
+		set dst to make new user playlist with properties {name:tmpName}
+		with timeout of 600 seconds
+			duplicate (every track of src) to dst
+		end timeout
+		set dstPID to persistent ID of dst
+		set dstCount to count of tracks of dst
+
+		if dstCount is not srcCount then
+			error "track count mismatch: source=" & srcCount & " clone=" & dstCount
+		end if
+
+		delete (some user playlist whose persistent ID is srcPID)
+
+		-- Music's name index lags after a delete, and the lag grows when
+		-- recreating playlists back-to-back. Retry up to ~30s.
+		set renamed to false
+		repeat with attempt from 1 to 60
+			try
+				set name of (some user playlist whose persistent ID is dstPID) to srcName
+			end try
+			delay 0.5
+			if name of (some user playlist whose persistent ID is dstPID) is srcName then
+				set renamed to true
+				exit repeat
+			end if
+		end repeat
+		if not renamed then
+			error "rename failed: clone still named " & (name of (some user playlist whose persistent ID is dstPID)) & ". original is already deleted"
+		end if
+
+		return dstPID
+	end tell
+end run
+`, escapedName)
+
+	output, err := runAppleScriptFile(script)
+	if err != nil {
+		return "", err
+	}
+	return output, nil
+}
+
 // AddFilesToPlaylist adds multiple files to a playlist.
 // Files must already be in the library.
 func AddFilesToPlaylist(filePaths []string, playlistName string, progressFn func(added, total int)) (int, error) {

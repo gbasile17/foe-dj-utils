@@ -13,7 +13,10 @@
       "Bash(asdf which:*)",
       "Bash(md5:*)",
       "Bash(hash:*)",
-      "Bash(/Users/foe/.asdf/installs/golang/1.24.2/bin/foe apple-recover:*)"
+      "Bash(/Users/foe/.asdf/installs/golang/1.24.2/bin/foe apple-recover:*)",
+      "WebFetch(domain:dougscripts.com)",
+      "WebFetch(domain:discussions.apple.com)",
+      "WebSearch"
     ],
     "deny": []
   }
