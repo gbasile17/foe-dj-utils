@@ -358,10 +358,15 @@ end tell
 	return added, nil
 }
 
-// RecreatePlaylist clones a user playlist's tracks into a new playlist, deletes
-// the original, and renames the clone to the original name. This forces iCloud
-// Music Library to re-upload the playlist (the new playlist has a fresh
-// persistent ID), which is the documented workaround for desynced playlists.
+// CloneAndDeletePlaylist clones a user playlist's tracks into a new playlist
+// named "<name> (resync)", verifies the track count matches, then deletes the
+// original. The clone keeps the temporary name on return — call RenamePlaylist
+// (with retries) afterwards to take over the original name.
+//
+// This is split from the rename step because Music's name index lags after a
+// delete, and the lag grows when iCloud Music Library is processing batch
+// deletes. A `delay` inside AppleScript blocks Music's event loop, which is
+// the very thing we need to drain — so the retry must happen from Go.
 //
 // Returns the new playlist's persistent ID.
 //
@@ -369,7 +374,7 @@ end tell
 // playlists. Errors out (without deleting anything) if the source can't be
 // found unambiguously, if "<name> (resync)" already exists from a prior run,
 // or if the cloned track count doesn't match the source.
-func RecreatePlaylist(playlistName string) (string, error) {
+func CloneAndDeletePlaylist(playlistName string) (string, error) {
 	escapedName := strings.ReplaceAll(playlistName, "\"", "\\\"")
 	script := fmt.Sprintf(`
 on run
@@ -412,33 +417,404 @@ on run
 
 		delete (some user playlist whose persistent ID is srcPID)
 
-		-- Music's name index lags after a delete, and the lag grows when
-		-- recreating playlists back-to-back. Retry up to ~30s.
-		set renamed to false
-		repeat with attempt from 1 to 60
-			try
-				set name of (some user playlist whose persistent ID is dstPID) to srcName
-			end try
-			delay 0.5
-			if name of (some user playlist whose persistent ID is dstPID) is srcName then
-				set renamed to true
-				exit repeat
-			end if
-		end repeat
-		if not renamed then
-			error "rename failed: clone still named " & (name of (some user playlist whose persistent ID is dstPID)) & ". original is already deleted"
-		end if
-
 		return dstPID
 	end tell
 end run
 `, escapedName)
 
+	return runAppleScriptFile(script)
+}
+
+// TryRenamePlaylist attempts to rename a playlist (by persistent ID) to a new
+// name in a single AppleScript call, then verifies the rename took effect.
+// Returns true if the new name is set on return, false otherwise.
+//
+// Music.app's `set name of ... to ...` can return without error and silently
+// fail when the target name was very recently held by another playlist that
+// was deleted; the only reliable confirmation is to read the name back.
+func TryRenamePlaylist(persistentID, newName string) (bool, error) {
+	escapedPID := strings.ReplaceAll(persistentID, "\"", "\\\"")
+	escapedNewName := strings.ReplaceAll(newName, "\"", "\\\"")
+	script := fmt.Sprintf(`
+on run
+	tell application "Music"
+		set p to (some user playlist whose persistent ID is "%s")
+		try
+			set name of p to "%s"
+		end try
+		if name of p is "%s" then
+			return "ok"
+		else
+			return "pending"
+		end if
+	end tell
+end run
+`, escapedPID, escapedNewName, escapedNewName)
+
 	output, err := runAppleScriptFile(script)
 	if err != nil {
-		return "", err
+		return false, err
 	}
-	return output, nil
+	return output == "ok", nil
+}
+
+// BlockingTrack represents a track in a source playlist that has a non-syncing
+// cloud status.
+type BlockingTrack struct {
+	SourcePlaylist string
+	PersistentID   string
+	Name           string
+	Artist         string
+	CloudStatus    string
+}
+
+// blockingStatusList is the set of `cloud status` values that prevent a track
+// from syncing to iCloud Music Library AND are unlikely to resolve themselves.
+// `not uploaded` is intentionally excluded — Apple's matcher may not have run
+// yet, and that state often clears on its own with time.
+//
+// We compare via string coercion (`(cloud status of t) as text`) inside a
+// per-track loop because AppleScript's `whose cloud status is ...` filter
+// rejects these enum literals at parse-time (`error` is a reserved keyword
+// in `whose` context, and the others fail with -10006).
+const blockingStatusListAppleScript = `{"ineligible", "error", "removed", "duplicate", "no longer available"}`
+
+// QuarantineBlockingTracks moves every track with a non-syncing cloud status
+// out of `srcName` and into `dstName`, creating `dstName` if needed.
+//
+// Tracks are de-duplicated within `dstName` by persistent ID — if the same
+// track is blocked in multiple source playlists, it appears in `dstName`
+// only once. The track stays in the library; only its membership in `srcName`
+// is removed.
+//
+// Returns the list of tracks moved (one entry per source-playlist removal,
+// even if a duplicate copy was already in `dstName`).
+func QuarantineBlockingTracks(srcName, dstName string) ([]BlockingTrack, error) {
+	escapedSrc := strings.ReplaceAll(srcName, "\"", "\\\"")
+	escapedDst := strings.ReplaceAll(dstName, "\"", "\\\"")
+
+	script := fmt.Sprintf(`
+on run
+	tell application "Music"
+		set srcName to "%s"
+		set dstName to "%s"
+		set blockingList to %s
+
+		set srcMatches to (every user playlist whose name is srcName)
+		if (count of srcMatches) is 0 then
+			error "no user playlist named " & srcName
+		end if
+		set src to item 1 of srcMatches
+
+		-- Ensure destination exists.
+		set dstMatches to (every user playlist whose name is dstName)
+		if (count of dstMatches) is 0 then
+			set dst to make new user playlist with properties {name:dstName}
+		else
+			set dst to item 1 of dstMatches
+		end if
+
+		-- Snapshot existing destination PIDs so we can de-dupe.
+		set existingPIDs to {}
+		repeat with t in (every track of dst)
+			set end of existingPIDs to (persistent ID of t)
+		end repeat
+
+		-- Find blocking tracks. AppleScript's whose-filter on cloud status
+		-- enum is unreliable (parser conflicts on the error keyword,
+		-- -10006 on others), so we iterate and string-coerce per track.
+		set blockers to {}
+		repeat with t in (every track of src)
+			set cs to (cloud status of t) as text
+			if blockingList contains cs then
+				set end of blockers to t
+			end if
+		end repeat
+
+		set output to ""
+		repeat with t in blockers
+			set tPID to persistent ID of t
+			set tName to name of t
+			set tArtist to artist of t
+			set tStatus to (cloud status of t) as text
+
+			-- Add to destination only if not already there.
+			if existingPIDs does not contain tPID then
+				duplicate t to dst
+				set end of existingPIDs to tPID
+			end if
+
+			-- Remove from source playlist (NOT from library — that would be
+			-- delete on playlist "Library").
+			delete t
+
+			set output to output & tPID & "||" & tName & "||" & tArtist & "||" & tStatus & "^^^"
+		end repeat
+
+		return output
+	end tell
+end run
+`, escapedSrc, escapedDst, blockingStatusListAppleScript)
+
+	output, err := runAppleScriptFile(script)
+	if err != nil {
+		return nil, err
+	}
+
+	var moved []BlockingTrack
+	if output == "" {
+		return moved, nil
+	}
+	for _, entry := range strings.Split(strings.TrimSuffix(output, "^^^"), "^^^") {
+		parts := strings.Split(entry, "||")
+		if len(parts) >= 4 {
+			moved = append(moved, BlockingTrack{
+				SourcePlaylist: srcName,
+				PersistentID:   parts[0],
+				Name:           parts[1],
+				Artist:         parts[2],
+				CloudStatus:    parts[3],
+			})
+		}
+	}
+	return moved, nil
+}
+
+// ListBlockingTracks returns every track in `srcName` whose cloud status
+// would block iCloud sync. Read-only — does not mutate the playlist.
+func ListBlockingTracks(srcName string) ([]BlockingTrack, error) {
+	escapedSrc := strings.ReplaceAll(srcName, "\"", "\\\"")
+	script := fmt.Sprintf(`
+on run
+	tell application "Music"
+		set src to (some user playlist whose name is "%s")
+		set blockingList to %s
+		set output to ""
+		repeat with t in (every track of src)
+			set cs to (cloud status of t) as text
+			if blockingList contains cs then
+				set output to output & (persistent ID of t) & "||" & (name of t) & "||" & (artist of t) & "||" & cs & "^^^"
+			end if
+		end repeat
+		return output
+	end tell
+end run
+`, escapedSrc, blockingStatusListAppleScript)
+
+	output, err := runAppleScriptFile(script)
+	if err != nil {
+		return nil, err
+	}
+	if output == "" {
+		return nil, nil
+	}
+	var tracks []BlockingTrack
+	for _, entry := range strings.Split(strings.TrimSuffix(output, "^^^"), "^^^") {
+		parts := strings.Split(entry, "||")
+		if len(parts) >= 4 {
+			tracks = append(tracks, BlockingTrack{
+				SourcePlaylist: srcName,
+				PersistentID:   parts[0],
+				Name:           parts[1],
+				Artist:         parts[2],
+				CloudStatus:    parts[3],
+			})
+		}
+	}
+	return tracks, nil
+}
+
+// CountBlockingTracks returns the number of tracks in `srcName` whose
+// cloud status would block iCloud sync. Read-only — for dry-run reporting.
+func CountBlockingTracks(srcName string) (int, error) {
+	escapedSrc := strings.ReplaceAll(srcName, "\"", "\\\"")
+	script := fmt.Sprintf(`
+tell application "Music"
+	set src to (some user playlist whose name is "%s")
+	set blockingList to %s
+	set n to 0
+	repeat with t in (every track of src)
+		set cs to (cloud status of t) as text
+		if blockingList contains cs then set n to n + 1
+	end repeat
+	return n
+end tell
+`, escapedSrc, blockingStatusListAppleScript)
+	output, err := runAppleScriptFile(script)
+	if err != nil {
+		return 0, err
+	}
+	var n int
+	fmt.Sscanf(output, "%d", &n)
+	return n, nil
+}
+
+// LibraryTrack represents a candidate canonical track in the library.
+type LibraryTrack struct {
+	PersistentID string
+	Name         string
+	Artist       string
+	Album        string
+	Duration     float64 // seconds
+	Size         int64   // bytes
+	Kind         string  // e.g. "Matched AAC audio file", "Apple Music AAC audio file"
+	CloudStatus  string
+	Location     string // POSIX path; empty if cloud-only / missing
+}
+
+// FindLibraryTracksByTitleArtist searches the entire library for tracks
+// whose name (case-insensitive substring) and artist match the given values.
+// Used to locate the canonical copy of a track flagged as `cloud status =
+// duplicate`. Caller is responsible for filtering down to the right one
+// (e.g. by duration tolerance) — this returns all candidates so the caller
+// can decide.
+func FindLibraryTracksByTitleArtist(titleSubstring, artist string) ([]LibraryTrack, error) {
+	escapedTitle := strings.ReplaceAll(titleSubstring, "\"", "\\\"")
+	escapedArtist := strings.ReplaceAll(artist, "\"", "\\\"")
+
+	script := fmt.Sprintf(`
+on run
+	tell application "Music"
+		set wantTitle to "%s"
+		set wantArtist to "%s"
+		set lib to playlist "Library"
+		set output to ""
+
+		-- AppleScript "contains" on text is case-insensitive by default. We
+		-- match on artist exactly and title as a substring (the source title
+		-- has been stripped of DJ prefixes by the caller, but Apple's catalog
+		-- title may differ slightly — substring is more forgiving).
+		set hits to (every track of lib whose artist is wantArtist and name contains wantTitle)
+		repeat with t in hits
+			set tLoc to ""
+			try
+				set tLoc to POSIX path of (location of t as alias)
+			end try
+			set tDur to 0
+			try
+				set tDur to duration of t
+			end try
+			set tSize to 0
+			try
+				set tSize to size of t
+			end try
+			set output to output & ¬
+				(persistent ID of t) & "||" & ¬
+				(name of t) & "||" & ¬
+				(artist of t) & "||" & ¬
+				(album of t) & "||" & ¬
+				tDur & "||" & ¬
+				tSize & "||" & ¬
+				(kind of t) & "||" & ¬
+				((cloud status of t) as text) & "||" & ¬
+				tLoc & "^^^"
+		end repeat
+		return output
+	end tell
+end run
+`, escapedTitle, escapedArtist)
+
+	output, err := runAppleScriptFile(script)
+	if err != nil {
+		return nil, err
+	}
+	if output == "" {
+		return nil, nil
+	}
+
+	var tracks []LibraryTrack
+	for _, entry := range strings.Split(strings.TrimSuffix(output, "^^^"), "^^^") {
+		parts := strings.Split(entry, "||")
+		if len(parts) >= 9 {
+			lt := LibraryTrack{
+				PersistentID: parts[0],
+				Name:         parts[1],
+				Artist:       parts[2],
+				Album:        parts[3],
+				Kind:         parts[6],
+				CloudStatus:  parts[7],
+				Location:     parts[8],
+			}
+			fmt.Sscanf(parts[4], "%f", &lt.Duration)
+			fmt.Sscanf(parts[5], "%d", &lt.Size)
+			tracks = append(tracks, lt)
+		}
+	}
+	return tracks, nil
+}
+
+// GetTrackDetails returns full details for a single track identified by
+// persistent ID. Used to fetch the duration of a `duplicate` track so we
+// can match candidates by duration tolerance.
+func GetTrackDetails(persistentID string) (*LibraryTrack, error) {
+	escapedPID := strings.ReplaceAll(persistentID, "\"", "\\\"")
+	script := fmt.Sprintf(`
+on run
+	tell application "Music"
+		set t to (some track of playlist "Library" whose persistent ID is "%s")
+		set tLoc to ""
+		try
+			set tLoc to POSIX path of (location of t as alias)
+		end try
+		return (persistent ID of t) & "||" & ¬
+			(name of t) & "||" & ¬
+			(artist of t) & "||" & ¬
+			(album of t) & "||" & ¬
+			(duration of t) & "||" & ¬
+			(size of t) & "||" & ¬
+			(kind of t) & "||" & ¬
+			((cloud status of t) as text) & "||" & ¬
+			tLoc
+	end tell
+end run
+`, escapedPID)
+	output, err := runAppleScriptFile(script)
+	if err != nil {
+		return nil, err
+	}
+	parts := strings.Split(output, "||")
+	if len(parts) < 9 {
+		return nil, fmt.Errorf("unexpected output: %q", output)
+	}
+	lt := &LibraryTrack{
+		PersistentID: parts[0],
+		Name:         parts[1],
+		Artist:       parts[2],
+		Album:        parts[3],
+		Kind:         parts[6],
+		CloudStatus:  parts[7],
+		Location:     parts[8],
+	}
+	fmt.Sscanf(parts[4], "%f", &lt.Duration)
+	fmt.Sscanf(parts[5], "%d", &lt.Size)
+	return lt, nil
+}
+
+// DeleteTrackFromLibrary removes a track from the Music library entirely
+// (not just from one playlist). Whether the underlying file is moved to
+// Trash depends on Music.app's "Keep Music Media folder organized" /
+// "delete from disk" preference; the caller should treat the file path as
+// possibly still present and handle the on-disk file separately.
+func DeleteTrackFromLibrary(persistentID string) error {
+	escapedPID := strings.ReplaceAll(persistentID, "\"", "\\\"")
+	script := fmt.Sprintf(`
+tell application "Music"
+	set matches to (every track of playlist "Library" whose persistent ID is "%s")
+	if (count of matches) is 0 then
+		error "no track with persistent ID " & "%s"
+	end if
+	delete (item 1 of matches)
+	return "ok"
+end tell
+`, escapedPID, escapedPID)
+	output, err := runAppleScriptFile(script)
+	if err != nil {
+		return err
+	}
+	if output != "ok" {
+		return fmt.Errorf("unexpected output: %q", output)
+	}
+	return nil
 }
 
 // AddFilesToPlaylist adds multiple files to a playlist.

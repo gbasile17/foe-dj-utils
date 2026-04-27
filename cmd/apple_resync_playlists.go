@@ -102,23 +102,70 @@ func runAppleResyncPlaylists(cmd *cobra.Command, args []string) {
 	}
 	fmt.Println()
 
-	var succeeded, failed []string
+	type pending struct {
+		name string
+		pid  string
+	}
+	var (
+		succeeded     []string
+		failed        []string
+		needsRename   []pending
+	)
+
+	// Phase 1: clone + delete-original for every target. Leaves each clone
+	// named "<name> (resync)".
 	for i, name := range targets {
 		Styles.Header.Printf("[%d/%d] %s\n", i+1, len(targets), name)
-		newPID, err := applemusic.RecreatePlaylist(name)
+		newPID, err := applemusic.CloneAndDeletePlaylist(name)
 		if err != nil {
 			Styles.Error.Printf("    failed: %v\n", err)
 			failed = append(failed, name)
 			continue
 		}
-		Styles.Success.Printf("    recreated (new persistent ID: %s)\n", newPID)
-		succeeded = append(succeeded, name)
+		Styles.Success.Printf("    cloned + deleted original (new pid: %s)\n", newPID)
+		needsRename = append(needsRename, pending{name: name, pid: newPID})
+	}
 
-		// Give Music's name index time to release the deleted name before the
-		// next playlist's rename. The lag grows when recreating playlists
-		// back-to-back, and skipping this is what caused (resync) leftovers.
-		if i < len(targets)-1 {
-			time.Sleep(1 * time.Second)
+	// Phase 2: drive the renames from Go. Music's name index lags after each
+	// delete and `delay` inside AppleScript blocks the very event loop that
+	// needs to drain that lag — so the retry has to happen across separate
+	// osascript invocations with sleeps in between.
+	if len(needsRename) > 0 {
+		fmt.Println()
+		Styles.Header.Printf("Renaming %d clone(s) to original names...\n", len(needsRename))
+
+		const renameTimeout = 5 * time.Minute
+		const renameInterval = 2 * time.Second
+		deadline := time.Now().Add(renameTimeout)
+
+		for len(needsRename) > 0 && time.Now().Before(deadline) {
+			var stillPending []pending
+			for _, p := range needsRename {
+				ok, err := applemusic.TryRenamePlaylist(p.pid, p.name)
+				if err != nil {
+					Styles.Error.Printf("    %s: rename error: %v\n", p.name, err)
+					failed = append(failed, p.name)
+					continue
+				}
+				if ok {
+					Styles.Success.Printf("    renamed: %s\n", p.name)
+					succeeded = append(succeeded, p.name)
+				} else {
+					stillPending = append(stillPending, p)
+				}
+			}
+			needsRename = stillPending
+			if len(needsRename) > 0 {
+				time.Sleep(renameInterval)
+			}
+		}
+
+		// Anything still pending after the timeout is a failure — but the
+		// "(resync)" leftover is recoverable: just rerun the command, the
+		// rename phase will pick them up again on a clean slate.
+		for _, p := range needsRename {
+			Styles.Error.Printf("    %s: rename never took effect (clone still named %q)\n", p.name, p.name+" (resync)")
+			failed = append(failed, p.name)
 		}
 	}
 
